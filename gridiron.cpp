@@ -13,7 +13,7 @@ extern "C" {
 #define BLUE 0
 #define GREEN 1
 #define RED 2
-#define TOLERANCE 20
+#define TOLERANCE 5
 #define TOLERANCE_H .5
 #define GRASS_HUE_TOLERANCE 10
 #define GRASS_LIGHT_MIN 5
@@ -68,6 +68,21 @@ extern "C" {
 
 using namespace cv;
 
+//use this struct to keep track of lines who intersect
+//in the picture, and who have similiar slopes
+typedef struct yardlineGroup{
+	int x_1_total;
+	int y_1_total;
+	int x_2_total;
+	int y_2_total;
+	int numLines;
+	yardlineGroup* next;
+};
+
+typedef struct yardlines{
+	yardlineGroup* ylGroup;
+	int numNodes;
+};
 
 typedef struct{
 	Point p1, p2;
@@ -117,8 +132,9 @@ typedef struct{
 }pixel_RGB_16;
 
 typedef struct{
-	unsigned char magnitude_int;   //1 byte
-	unsigned char magnitude_mant;//1 byte
+	float magnitude;
+	//unsigned char magnitude_int;   //1 byte
+	//unsigned char magnitude_mant;//1 byte
 	unsigned char angle;   //1 byte
 	short hue; //2 bytes
 }pixel_gradient;
@@ -146,9 +162,24 @@ typedef struct
     floatSlopeNode* sidelines;
 }linesPair;
 
+
+void onMouse(int evt, int x, int y, int flags, void* cl)
+{
+	 if(evt == CV_EVENT_LBUTTONDOWN) 
+	 {
+        Point* ptPtr = (Point*)cl;
+        ptPtr->x = x;
+        ptPtr->y = y;
+		fprintf(stderr, "X: %d - y: %d\n", x, y);
+    }
+}
+
+myLine houghTransform(Mat src, int thetaMin, int thetaMax, float thetaIncrement, lab_pixel ref);
+
+
 // Convolution stuff
 
-void mapGradients(Mat src);
+vector<Vec2f> mapGradients(Mat src);
 double applyConvolutionMat(int* convolutionMat, pixel* pxl);
 // ********************************************************** //
 
@@ -164,10 +195,11 @@ float getSlopeF(floatPoint p1, floatPoint f2);
 float getYintF(floatPoint p1, floatPoint p2);
 float getYintFSlope(floatPoint p1, float m);
 float R2XY(float theta);
+int round(float n);
 
 float XY2R(floatPoint p1, floatPoint p2);
 
-
+yardlines* refineLines(vector<Vec2f> lines, Mat img);
 void findLines(Mat image, blob* players);
 void printLines(fPointList* lines, int lineCount, Mat image, blob* players);
 
@@ -215,6 +247,12 @@ int main(int argc, char** argv)
 	char* filename = "C:/Users/Administrator/Documents/Visual Studio 2010/Projects/Gridiron_Analyst/Gridiron_Analyst/debug/wesleyan.png";
 	Mat image, img;
 	image = imread(filename, 1);
+	Point mouseCoordinates;
+	namedWindow("GUI");
+	imshow("GUI", image);
+	setMouseCallback("GUI", onMouse, (void*)&mouseCoordinates);
+	waitKey();
+
 	imgWidth = image.cols;
 	imgHeight = image.rows;
 	/* Mode Color Array */
@@ -223,27 +261,47 @@ int main(int argc, char** argv)
 
 	Stack* stk = new Stack(10000);
 	
-	blob* topHundred = (blob*)calloc(100, sizeof(*topHundred));
-	for(int k=0;k<100;k++)
-	{
-		topHundred[k].delta_e = TOLERANCE + 1; //initialize to something one greater than TOLERANCE
-	}
+	
     /* grass pixel */
 	pixel* grassPix = (pixel*) malloc(sizeof(*grassPix));
 	
-	/* jersey pixel */
+	/* jersey pixels */
 	pixel rgbPix;
+	pixel rgbPix2;
+	lab_pixel labPix;
+	lab_pixel labPix2;
 
-	/*/TUFTS JERSEY
-	/rgbPix.r = 150;
-	rgbPix.g = 149;
-	rgbPix.b = 191;
-	*/
-	
+	//TUFTS JERSEY
+	rgbPix.r = 127;
+	rgbPix.g = 138;
+	rgbPix.b = 180;
+	Rgb2Lab(&labPix.L, &labPix.a, &labPix.b, rgbPix.r/255.0, rgbPix.g/255.0, rgbPix.b/255.0);
+
+	blob* rgbPixBlobs = (blob*)calloc(100, sizeof(*rgbPixBlobs));
+	for(int k=0;k<30;k++)
+	{
+		rgbPixBlobs[k].delta_e = TOLERANCE + 1; //initialize to something one greater than TOLERANCE
+	}
+
+
+	//Wesleyan Jersey
+	rgbPix2.r = 252;
+	rgbPix2.g = 247;
+	rgbPix2.b = 255;
+	Rgb2Lab(&labPix2.L, &labPix2.a, &labPix2.b, rgbPix2.r/255.0, rgbPix2.g/255.0, rgbPix2.b/255.0);
+
+	blob* rgbPix2Blobs = (blob*)calloc(100, sizeof(*rgbPix2Blobs));
+	for(int k=0;k<30;k++)
+	{
+		rgbPix2Blobs[k].delta_e = TOLERANCE + 1; //initialize to something one greater than TOLERANCE
+	}
+
+
 	//Middlebury jerseys
-	rgbPix.r = 44;
+	/*rgbPix.r = 44;
 	rgbPix.g = 41;
 	rgbPix.b = 49;
+	*/
 
 	// ATLANTA FALCONS JERSEY
 	/*
@@ -260,83 +318,76 @@ int main(int argc, char** argv)
 
 	//mapGradients(image);
 	
-	lab_pixel refLabPxl;
-
-	Rgb2Lab(&refLabPxl.L, &refLabPxl.a, &refLabPxl.b, rgbPix.r/255.0, rgbPix.g/255.0, rgbPix.b/255.0);
-
 	pixel* pixPtr = (pixel*)image.data;
-
-	int channels = image.channels();
 	
-	
-	/*
-	for(int i=0; i < image.rows; i++)
+/*	for(int i=0; i < image.rows; i++)
 	{ //row-major
 		for(int j=0; j<image.cols; j++)
 		{ //horizontal traversal
 		    pixel* rgb_pxl = pixPtr + (image.cols*i) + j;
-	        
-	//		colors[RGB2Short(rgb_pxl)]++;
 			
 			lab_pixel lab_pxl;
 		    lab_pixel lab_grass;
-			//RGB2Lab(rgb_pxl, &lab_pxl);
-			
+				
 			num R, G, B;
 			R = rgb_pxl->r/255.0;
 			G = rgb_pxl->g/255.0;
 			B = rgb_pxl->b/255.0;
-			num D[3];
-			Rgb2Lch(&D[0], &D[1], &D[2], R, G, B);
-			int H = D[2];
-			//fprintf(stderr, "L: %f a: %f b: %f\n", D[0], D[1], D[2]);
-		    hues[H]++;
-			
-			Lch2Rgb(&R, &G, &B, D[0], D[1], D[2]);
-			
-			rgb_pxl->r = R*255;
-			rgb_pxl->g = G*255;
-			rgb_pxl->b = B*255;
-			
-		
-			//float L, a, b;
+			//num L, a, b;
 
 			Rgb2Lab(&lab_pxl.L, &lab_pxl.a, &lab_pxl.b, R, G, B);
-						
-			if(delta_e(&lab_pxl, &refLabPxl) < TOLERANCE)
+									
+			if(delta_e(&lab_pxl, &labPix) < TOLERANCE)
             { 
 				fprintf(stderr, "SCANLINE FILL\n");
-				insertionSort(scanline_fill(rgb_pxl, &refLabPxl, image, j, i, stk), topHundred);
+				insertionSort(scanline_fill(rgb_pxl, &labPix, image, j, i, stk), rgbPixBlobs);
 			}
+			if(delta_e(&lab_pxl, &labPix2) < TOLERANCE)
+            { 
+				fprintf(stderr, "SCANLINE FILL\n");
+				insertionSort(scanline_fill(rgb_pxl, &labPix2, image, j, i, stk), rgbPix2Blobs);
+			}
+
 		}
     }*/
 
-	
-   
-	/* Find MODE color 
-	int max = -1;
-	int hID = 0;
-	for(short j=0; j<360; j++)
-	{
-		if(hues[j] > max)
-		{
-			max = hues[j];
-			hID = j;
-		}
-	}
-	*/
-    mapGradients(image);
-	
-//	fprintf(stderr, "Hue: %d\n", hID);
-	
-	//Short2RGB(cID, grassPix);
-	//grassPix.r = 96;
-	//grassPix.g = 128;
-	//grassPix.b = 64;
-	//fprintf(stderr, "FIELD COLOR\nR: %d\nG: %d\nB: %d\n\n", (grassPix->r), (grassPix->g), (grassPix->b));
-/********************/
+	image.copyTo(img);
+    vector<Vec2f> lines = mapGradients(image);
+    yardlines* ylines = refineLines(lines, image);
 
-	// GRASS LINES
+	double avgTheta = 0;
+	yardlineGroup* ylGroup = ylines->ylGroup;
+
+	for(int n=0; n<ylines->numNodes; n++)
+	{
+		avgTheta = avgTheta + atan2((double)((ylGroup->y_1_total / ylGroup->numLines) -
+			             (ylGroup->y_2_total / ylGroup->numLines)), 
+					((ylGroup->x_1_total / ylGroup->numLines) -
+			             (ylGroup->x_2_total / ylGroup->numLines)));
+
+		ylGroup = ylGroup->next;
+	}
+
+	avgTheta /= ylines->numNodes;
+	avgTheta = avgTheta * 180 / CV_PI;
+
+	int theta_int = round(avgTheta);
+	fprintf(stderr, "L.O.S. THETA: %d\n", theta_int); //321? need to nOT ADD PI!
+				    
+	theta_int = (theta_int + 180) % 180; //ensure every angle is in quadrants I and II
+
+	int transformedTheta = 90 - ( 180 - theta_int);
+	myLine oline1 = houghTransform(img, transformedTheta-2, transformedTheta+2, .5, labPix);
+	myLine oline2 = houghTransform(img, transformedTheta-2, transformedTheta+2, .5, labPix2);
+	
+	myLine LOS;
+	LOS.p1.x = (oline1.p1.x + oline2.p1.x) / 2;
+	LOS.p1.y = (oline1.p1.y + oline2.p1.y) / 2;
+	LOS.p2.x = (oline1.p2.x + oline2.p2.x) / 2;
+	LOS.p2.y = (oline1.p2.y + oline2.p2.y) / 2;
+
+	line(img, LOS.p1, LOS.p2, Scalar(0, 215, 255), 6);
+	// GRASS LINE
 	
 	// find all lines, or places where green remains, but brightness increases 
 	/*for(int i=0; i < image.rows; i++)
@@ -377,22 +428,93 @@ int main(int argc, char** argv)
 	*/
 
 	//findLines(image, topHundred);
-	/*
+	
 	for(int k=0; k<11; k++)
 	{
-		Point p = Point(topHundred[k].x, topHundred[k].y);
+		Point p = Point(rgbPixBlobs[k].x, rgbPixBlobs[k].y);
 		//fprintf(stderr, "DONE x: %d, y: %d\n", topHundred[k].x, topHundred[k].y);
 		MyFilledCircle(image, p, 0, 0, 255);
 	}
-	for(int l=11; l<100; l++)
+	for(int l=0; l<11; l++)
 	{
-		Point p = Point(topHundred[l].x, topHundred[l].y);
+		Point p = Point(rgbPix2Blobs[l].x, rgbPix2Blobs[l].y);
 		MyFilledCircle(image, p, 255, 0, 0);
-	}*/
+	}
 
 	
-	imshow("Color Distance", image);
+	imshow("Yardline Detection", image);
 	waitKey();
+	imshow("Line of Scrimmage Detection", img);
+	waitKey();
+}
+
+
+
+myLine houghTransform(Mat src, int thetaMin, int thetaMax, float thetaIncrement, lab_pixel ref)
+{
+	if(thetaMin > thetaMax){fprintf(stderr, "min must be less than max in houghTransform! exiting\n"); exit(0);}
+	int thetaRange = (thetaMax-thetaMin + 1) / thetaIncrement;
+	int rRange = floor(sqrt((double)(src.rows*src.rows) + (src.cols*src.cols))) + 1;
+	
+	int* accumulator = (int*) calloc(rRange*thetaRange, sizeof(*accumulator));
+	
+	pixel* pxlPtr = (pixel*) src.data;
+
+	for(int i=0; i<src.rows; i++)
+	{
+		for(int j=0; j<src.cols;j++)
+		{
+			lab_pixel pix;
+			Rgb2Lab(&pix.L, &pix.a, &pix.b, pxlPtr->r/255.0, pxlPtr->g/255.0, pxlPtr->b/255.0);
+			if(delta_e(&ref, &pix) < TOLERANCE)
+			{
+				for(float theta=0; theta < thetaRange; theta+=thetaIncrement)
+				{
+					float realTheta = theta + (float)thetaMin;
+					int r = round(j*(cos(realTheta*CV_PI/180)) + i*(sin(realTheta*CV_PI/180)));
+					accumulator[thetaRange*r + round(theta/thetaIncrement)] = accumulator[thetaRange*r + round(theta/thetaIncrement)] + 1;
+				}
+			}
+			pxlPtr++;
+		}
+	}
+
+	int max=0;
+	int r_max=0;
+	float theta_max=0;
+	for(int r=0;r<rRange;r++)
+	{
+		for(int t=0; t<thetaRange; t++)
+		{
+			int hits = accumulator[r*thetaRange + t];
+			if(hits > max)
+			{
+				max = hits;
+				r_max = r;
+				theta_max = (float)t*thetaIncrement + thetaMin;
+			}
+		}
+	}
+	
+	
+	fprintf(stderr, "theta: %f - rho: %d - hits: %d\n", theta_max, r_max, max);
+
+	double a = cos(theta_max*CV_PI/180), b = sin(theta_max*CV_PI/180);
+    double x0 = a*r_max, y0 = b*r_max;
+    Point pt1(cvRound(x0 + 1000*(-b)),
+                  cvRound(y0 + 1000*(a)));
+    Point pt2(cvRound(x0 - 1000*(-b)),
+                  cvRound(y0 - 1000*(a)));
+	num R, G, B;
+	Lab2Rgb(&R, &G, &B, ref.L, ref.a, ref.b);
+
+
+	line(src, pt1, pt2, Scalar(B*255,G*255,R*255), 4);
+
+	myLine line;
+	line.p1 = pt1;
+	line.p2 = pt2;
+	return line;
 }
 
 float getY(float m, int yInt, int x)
@@ -704,6 +826,9 @@ floatSlopeNode* hierarchicalCluster(floatSlopeNode* head, int numLines, int k)
 	}
      return top;
 }
+
+
+
 void printLines(fPointList* lines, int lineCount, Mat image, blob* players) //lines is a linked list
 {
 	
@@ -919,6 +1044,96 @@ floatPoint getIntersection(Point pt1, Point pt2, Point pt3, Point pt4)
 	intersection.y = slope1*intersection.x + yInt1;
 
     return intersection;
+}
+
+
+yardlines* refineLines(vector<Vec2f> lines, Mat img)
+{
+
+		yardlines* ylines = (yardlines*)malloc(sizeof(*ylines));
+	
+		ylines->ylGroup = (yardlineGroup*) malloc(sizeof(*ylines->ylGroup));
+
+		float rho = lines[0][0], theta = lines[0][1];
+		Point pt1, pt2;
+		double a = cos(theta), b = sin(theta);
+		double x0 = a*rho, y0 = b*rho;
+		pt1.x = cvRound(x0 + 1000*(-b));
+		pt1.y = cvRound(y0 + 1000*(a));
+		pt2.x = cvRound(x0 - 1000*(-b));
+		pt2.y = cvRound(y0 - 1000*(a));
+
+	int numNodes = 1;
+	yardlineGroup* head = ylines->ylGroup;
+	//ylGroup->next = (yardlineGroup*) malloc(sizeof(*ylGroup->next));
+	ylines->ylGroup->numLines = 1;
+	ylines->ylGroup->x_1_total = pt1.x;
+	ylines->ylGroup->y_1_total = pt1.y;
+	ylines->ylGroup->x_2_total = pt2.x;
+	ylines->ylGroup->y_2_total = pt2.y;
+
+	for( size_t i = 1; i < lines.size(); i++ )
+    {
+		float rho = lines[i][0], theta = lines[i][1];
+		Point pt1, pt2;
+		double a = cos(theta), b = sin(theta);
+		double x0 = a*rho, y0 = b*rho;
+		pt1.x = cvRound(x0 + 1000*(-b));
+		pt1.y = cvRound(y0 + 1000*(a));
+		pt2.x = cvRound(x0 - 1000*(-b));
+		pt2.y = cvRound(y0 - 1000*(a));
+		yardlineGroup* cur = head;
+		for(int j=0; j<numNodes; j++)//iterate across the known yardLines
+		{
+			Point pt1_j, pt2_j;
+			pt1_j.x = (cur->x_1_total / cur->numLines);
+			pt1_j.y = (cur->y_1_total / cur->numLines);
+			pt2_j.x = (cur->x_2_total / cur->numLines);
+			pt2_j.y = (cur->y_2_total / cur->numLines);
+
+			floatPoint fp1;
+			fp1 = getIntersection(pt1, pt2, pt1_j, pt2_j);
+
+			if(fp1.x > 0 && fp1.x < img.cols && fp1.y > 0 && fp1.y < img.rows) // should check for angle within range also!
+																				//if angle is out of range, ignore it!
+			{	//Add to the group of similar yardlines
+				cur->x_1_total += pt1.x;
+				cur->y_1_total += pt1.y;
+				cur->x_2_total += pt2.x;
+				cur->y_2_total += pt2.y;
+				cur->numLines++;
+				break;
+			}else if(j == numNodes-1) //we are on the last node, add a new one
+			{	//Create new yardline group
+				cur->next = (yardlineGroup*) malloc(sizeof(*cur->next));
+				cur->next->x_1_total = pt1.x;
+				cur->next->y_1_total = pt1.y;
+				cur->next->x_2_total = pt2.x;
+				cur->next->y_2_total = pt2.y;
+				cur->next->numLines = 1;
+				numNodes++;
+				break;
+			}else cur=cur->next;//compare the next
+			
+
+		}
+        //line(image, pt1, pt2, Scalar(199,255,0), 3, CV_AA);
+    }
+
+	for(int i=0; i<numNodes; i++)
+	{
+		Point p1, p2;
+		p1.x = head->x_1_total / head->numLines;
+		p1.y = head->y_1_total / head->numLines;
+		p2.x = head->x_2_total / head->numLines;
+		p2.y = head->y_2_total / head->numLines;
+
+		line(img, p1, p2, Scalar(0, 255, 0), 3, CV_AA);
+		head = head->next;
+	}
+
+	ylines->numNodes = numNodes;
+	return ylines;
 }
 bool isWhite(pixel* rgb)
 {
@@ -1185,7 +1400,6 @@ int round(float n)
 	}else
 		return floor(n);
 }
-//fuck microsoft
 
 int findModeHue(int* hues)
 { //maybe print this graph out?
@@ -1202,14 +1416,15 @@ int findModeHue(int* hues)
 	return modeHue;
 }
 
-void MatRgb2Gradients(Mat src, pixel_gradient* gradientArr, int* hues, double* angleCount, double* magnitudes, double* magCount)
+void MatRgb2Gradients(Mat src, pixel_gradient* gradientArr, pixel_gradient* vertGradientArr, int* hues, double* angleCount, double* magnitudes, double* magCount)
 {
 	pixel* origin = (pixel*) src.data;
 	pixel* cur;
 	pixel_gradient* cur_grad = gradientArr;
+	pixel_gradient* cur_vert_grad = vertGradientArr;
 	
-	int dYmat[9] = {1, 2, 1, 0, 0, 0, -1, -2, -1};
-	int dXmat[9] = {-1, 0, 1, -2, 0, 2, -1, 0, 1};
+	int dYmat[9] = {3, 10, 3, 0, 0, 0, -3, -10, -3};
+	int dXmat[9] = {-3, 0, 3, -10, 0, 10, -3, 0, 3};
 	float L, C, H;
 
 	double size = (src.rows - 4) * (src.cols - 4);
@@ -1224,39 +1439,43 @@ void MatRgb2Gradients(Mat src, pixel_gradient* gradientArr, int* hues, double* a
 			
 		    double Dy = applyConvolutionMat(dYmat, center);
 			double Dx = applyConvolutionMat(dXmat, center);
-			double magnitude =   sqrt((Dy * Dy) + (Dx * Dx));
-			int gradientAngle =  (round(atan2(Dy, Dx) * 180/PI) + 180) % 180;
-
+			float magnitude =   sqrt((Dy * Dy) + (Dx * Dx));
+			//ensure that gradientAngle is a value 0-360, not -180-180
+			int gradientAngle =  (round(atan2(Dy, Dx) * 180/PI)) + 180;// + 180) % 180; THIS would allow for line detection in both directions (false positives)
+			
 			cur_grad->angle = gradientAngle;
 			cur_grad->hue   = H;
-			cur_grad->magnitude_int  = floor(magnitude);
-			cur_grad->magnitude_mant = round((magnitude - floor(magnitude)) * 255);
-
+			cur_grad->magnitude = magnitude;
+			//cur_grad->magnitude_mant = round((magnitude - floor(magnitude)) * 255);
+			
 			angleCount[gradientAngle] += 1;
-			magnitudes[gradientAngle] += (cur_grad->magnitude_int + (cur_grad->magnitude_mant / 255.0));
+			magnitudes[gradientAngle] += cur_grad->magnitude;//_int + (cur_grad->magnitude_mant / 255.0));
 			magCount[round(magnitude)]++;
+			
 			hues[round(H)]++;
-
+			
 			cur_grad++;
 		}
 	}
 }
 
-void mapGradients(Mat img)
+vector<Vec2f> mapGradients(Mat img)
 {
 	Mat src = Mat(img.rows, img.cols, CV_8UC3, Scalar(0,0,0));
 	
 	GaussianBlur(img, src, Size(5, 5), 0, 0);
 	img.release();
 
+
 	int* hues = (int*) calloc(360, sizeof(*hues));
 	pixel_gradient* gradientArr = (pixel_gradient*) calloc((src.rows * src.cols - 1), sizeof(*gradientArr));
-	double* angleCount  = (double*) calloc(180, sizeof(*angleCount));
-	double* magnitudes  = (double*) calloc(180, sizeof(*magnitudes));
-	float* avgMagnitudes = (float*) calloc(180, sizeof(*avgMagnitudes));
-	double* magnitudeCount = (double*) calloc(144, sizeof(*magnitudeCount));
+	pixel_gradient* vertGradientArr = (pixel_gradient*) calloc((src.rows * src.cols - 1), sizeof(*gradientArr));
+	double* angleCount  = (double*) calloc(360, sizeof(*angleCount));
+	double* magnitudes  = (double*) calloc(360, sizeof(*magnitudes));
+	float* avgMagnitudes = (float*) calloc(360, sizeof(*avgMagnitudes));
+	double* magnitudeCount = (double*) calloc(3000, sizeof(*magnitudeCount)); //unneccessary
 
-	MatRgb2Gradients(src, gradientArr, hues, angleCount, magnitudes, magnitudeCount);
+	MatRgb2Gradients(src, gradientArr, vertGradientArr, hues, angleCount, magnitudes, magnitudeCount);
 
 	int modeHue = findModeHue(hues);
 
@@ -1265,7 +1484,6 @@ void mapGradients(Mat img)
 	if(f == NULL)
 	{
 		fprintf(stderr, "DEAD\n");
-		waitKey();
 		exit(0);
 	}
 	
@@ -1276,7 +1494,7 @@ void mapGradients(Mat img)
 	double maxMagnitude = -1;
 	int MagnitudeIndex = 0;
 
-	for(int theta=0; theta<180; theta++)
+	for(int theta=0; theta<360; theta++)
 	{
 		avgMagnitudes[theta] = magnitudes[theta] / angleCount[theta];
 
@@ -1301,10 +1519,6 @@ void mapGradients(Mat img)
 
 	fprintf(f, "%d, %d, %d, %d\n\n", AvgMagIndex, MagnitudeIndex, AngleCountIndex, modeHue);
 
-	for(int h=0;h<142;h++)
-	{
-		fprintf(f, "%d,%f\n", h, magnitudeCount[h]);
-	}
 
 	//exit(1);
 
@@ -1332,10 +1546,10 @@ void mapGradients(Mat img)
 				}else
 				{
 					int range = 10 ;
-					float mag = gradient->magnitude_int + (gradient->magnitude_mant / 255.0);
-				    if(abs(gradient->angle - MagnitudeIndex) < range && (mag > maxAvgMag))
+					float mag = gradient->magnitude;
+				    if(abs(gradient->angle - MagnitudeIndex) < range && (mag > maxAvgMag*.5))
 					{
-						int min = MagnitudeIndex - range;
+					    /*int min = MagnitudeIndex - range;
 						int space = 360 / (range*2); //number of different hues that can be mapped to
 						float L, C, H;
 						
@@ -1346,7 +1560,10 @@ void mapGradients(Mat img)
 						Lch2Rgb(&R, &G, &B, L, C, H);
 						cur->r = round(R*255);
 						cur->g = round(G*255);
-						cur->b = round(B*255);
+						cur->b = round(B*255);*/
+						cur->r=255;
+						cur->g=255;
+						cur->b=255;
 					}else
 					{
 						cur->r = 0;
@@ -1354,6 +1571,7 @@ void mapGradients(Mat img)
 						cur->b = 0;
 					}
 				}
+				
 				gradient++;
 			}
 			cur++;
@@ -1374,22 +1592,22 @@ void mapGradients(Mat img)
         Point pt2(cvRound(x0 - 1000*(-b)),
                   cvRound(y0 - 1000*(a)));
 		
-		int lineTheta = 0;
-		lineTheta = (round(theta * 180 / CV_PI));
-		fprintf(stderr, "%d..%d\n", (180 - lineTheta), ((MagnitudeIndex+90) % 180));
-		if(abs(lineTheta - ((MagnitudeIndex+90) % 180)) < 4) //BROKEN, is theta already in degrees?
-		{
+		//int lineTheta = 0;
+		//lineTheta = (round(theta * 180 / CV_PI));
+		//fprintf(stderr, "%d..%d\n", (180 - lineTheta), ((MagnitudeIndex+90) % 180));
+		//if(abs(lineTheta - ((MagnitudeIndex+90) % 180)) < 4) //BROKEN, is theta already in degrees?
+		//{
 			//MyFilledCircle(src, pt1, 255, 0, 0);
 			//MyFilledCircle(src, pt2, 0, 255, 0);
-            line(src, pt1, pt2, Scalar(0, 0,255), 3, 8 );
-		}
+          //  line(src, pt1, pt2, Scalar(0, 0,255), 3, 8 );
+		//}
 	}
 
 
 
 	imshow("Edge Detect", src);
 	waitKey();
-	exit(1);
+	return lines;
 }
 
 double applyConvolutionMat(int* convolutionMat, pixel* pxl)
